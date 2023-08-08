@@ -188,13 +188,22 @@ extern void alm2pos(gtime_t time, const alm_t *alm, double *rs, double *dts)
 * notes  : see ref [1],[7],[8]
 *          satellite clock does not include relativity correction and tdg
 *-----------------------------------------------------------------------------*/
+/**
+ * @brief 通过广播星历计算卫星钟差（GPS、北斗、伽利略、QZSS）
+ * 
+ * @param time 卫星发射信号的时间
+ * @param eph  星历
+ * @return double 钟差
+ * 
+ * @note 此处所求钟差不含相对论效应改正和群延迟改正
+ */
 extern double eph2clk(gtime_t time, const eph_t *eph)
 {
     double t,ts;
     int i;
     
     trace(4,"eph2clk : time=%s sat=%2d\n",time_str(time,3),eph->sat);
-    
+    /* toe 星期日子夜零点起算的星历参考时刻 */
     t=ts=timediff(time,eph->toc);
     
     for (i=0;i<2;i++) {
@@ -215,6 +224,18 @@ extern double eph2clk(gtime_t time, const eph_t *eph)
 *          satellite clock includes relativity correction without code bias
 *          (tgd or bgd)
 *-----------------------------------------------------------------------------*/
+
+/**
+ * @brief 计算卫星位置、钟差（GPS、GALILEO、QZSS、北斗）
+ * 
+ * @param time 经过钟差改正的卫星信号发射时间
+ * @param eph  输入广播星历
+ * @param rs   ECEF系下卫星位置(m)
+ * @param dts  卫星钟差
+ * @param var  卫星位置和钟差的方差
+ * 
+ * @note 该处卫星钟差包含相对论效应改正，但没有时延差改正
+ */
 extern void eph2pos(gtime_t time, const eph_t *eph, double *rs, double *dts,
                     double *var)
 {
@@ -223,22 +244,25 @@ extern void eph2pos(gtime_t time, const eph_t *eph, double *rs, double *dts,
     int n,sys,prn;
     
     trace(4,"eph2pos : time=%s sat=%2d\n",time_str(time,3),eph->sat);
-    
+    /*首先判断半长轴是否等于0（用于首次进入函数），如果是，那么卫星位置、钟差、钟漂、方差均设置为0，
+    然后tk算出信号发射时刻与星历参考时间的时间差。*/
     if (eph->A<=0.0) {
         rs[0]=rs[1]=rs[2]=*dts=*var=0.0;
         return;
     }
-    tk=timediff(time,eph->toe);
-    
+    /* tk为相对于参考时刻toe的归化时间，但应计及一个星期（共604800s）的开始和结束。亦即当tk
+      >302400s时，tk应该减去604800s，当tk< -302400s时，tk应加上604800s*/
+    tk=timediff(time,eph->toe);//E.4.2
+    /* 计算卫星运动的平均角速度sqrt(mu/(eph->A*eph->A*eph->A) 与平近点角M */
     switch ((sys=satsys(eph->sat,&prn))) {
         case SYS_GAL: mu=MU_GAL; omge=OMGE_GAL; break;
         case SYS_CMP: mu=MU_CMP; omge=OMGE_CMP; break;
         default:      mu=MU_GPS; omge=OMGE;     break;
     }
-    M=eph->M0+(sqrt(mu/(eph->A*eph->A*eph->A))+eph->deln)*tk;
-    
+    M=eph->M0+(sqrt(mu/(eph->A*eph->A*eph->A))+eph->deln)*tk;//E.4.3
+    /* 计算卫星运动的偏近点角E */
     for (n=0,E=M,Ek=0.0;fabs(E-Ek)>RTOL_KEPLER&&n<MAX_ITER_KEPLER;n++) {
-        Ek=E; E-=(E-eph->e*sin(E)-M)/(1.0-eph->e*cos(E));
+        Ek=E; E-=(E-eph->e*sin(E)-M)/(1.0-eph->e*cos(E));//E.4.4 & E.4.18-20
     }
     if (n>=MAX_ITER_KEPLER) {
         trace(2,"eph2pos: kepler iteration overflow sat=%2d\n",eph->sat);
@@ -247,39 +271,46 @@ extern void eph2pos(gtime_t time, const eph_t *eph, double *rs, double *dts,
     sinE=sin(E); cosE=cos(E);
     
     trace(4,"kepler: sat=%2d e=%8.5f n=%2d del=%10.3e\n",eph->sat,eph->e,n,E-Ek);
-    
-    u=atan2(sqrt(1.0-eph->e*eph->e)*sinE,cosE-eph->e)+eph->omg;
+    /* 计算真近点角(fk)和升交距角u*/
+    u=atan2(sqrt(1.0-eph->e*eph->e)*sinE,cosE-eph->e)+eph->omg;//E.4.5-6
     r=eph->A*(1.0-eph->e*cosE);
     i=eph->i0+eph->idot*tk;
     sin2u=sin(2.0*u); cos2u=cos(2.0*u);
-    u+=eph->cus*sin2u+eph->cuc*cos2u;
-    r+=eph->crs*sin2u+eph->crc*cos2u;
-    i+=eph->cis*sin2u+eph->cic*cos2u;
+    /* 计算经过摄动改正后的升交距角u*/
+    u+=eph->cus*sin2u+eph->cuc*cos2u;//E.4.10
+    /* 计算经过摄动改正后的向径r*/
+    r+=eph->crs*sin2u+eph->crc*cos2u;//E.4.11
+    /* 计算经过摄动改正后的倾角i*/
+    i+=eph->cis*sin2u+eph->cic*cos2u;//E.4.12
+    /* 计算卫星在轨道平面直角坐标系的坐标（X轴指向升交点）*/
     x=r*cos(u); y=r*sin(u); cosi=cos(i);
     
     /* beidou geo satellite */
     if (sys==SYS_CMP&&(prn<=5||prn>=59)) { /* ref [9] table 4-1 */
-        O=eph->OMG0+eph->OMGd*tk-omge*eph->toes;
+        O=eph->OMG0+eph->OMGd*tk-omge*eph->toes;//E.4.29
         sinO=sin(O); cosO=cos(O);
         xg=x*cosO-y*cosi*sinO;
         yg=x*sinO+y*cosi*cosO;
         zg=y*sin(i);
         sino=sin(omge*tk); coso=cos(omge*tk);
-        rs[0]= xg*coso+yg*sino*COS_5+zg*sino*SIN_5;
-        rs[1]=-xg*sino+yg*coso*COS_5+zg*coso*SIN_5;
-        rs[2]=-yg*SIN_5+zg*COS_5;
+        rs[0]= xg*coso+yg*sino*COS_5+zg*sino*SIN_5;//E.4.30 卫星x坐标
+        rs[1]=-xg*sino+yg*coso*COS_5+zg*coso*SIN_5;//E.4.30 卫星y坐标
+        rs[2]=-yg*SIN_5+zg*COS_5;                  //E.4.30 卫星z坐标
     }
     else {
+        /*观测瞬间升交点的经度值O*/
         O=eph->OMG0+(eph->OMGd-omge)*tk-omge*eph->toes;
         sinO=sin(O); cosO=cos(O);
-        rs[0]=x*cosO-y*cosi*sinO;
-        rs[1]=x*sinO+y*cosi*cosO;
-        rs[2]=y*sin(i);
+        /* 计算卫星在地心地固坐标系中的坐标*/
+        rs[0]=x*cosO-y*cosi*sinO; //E.4.14 卫星x坐标
+        rs[1]=x*sinO+y*cosi*cosO; //E.4.14 卫星y坐标
+        rs[2]=y*sin(i);           //E.4.14 卫星z坐标
     }
-    tk=timediff(time,eph->toc);
+    tk=timediff(time,eph->toc);//E.4.15 toc导航电文第一数据块参考时刻
     *dts=eph->f0+eph->f1*tk+eph->f2*tk*tk;
     
     /* relativity correction */
+    /*为钟差进行相对论效应改正*/
     *dts-=2.0*sqrt(mu*eph->A)*eph->e*sinE/SQR(CLIGHT);
     
     /* position and clock error variance */
@@ -419,6 +450,17 @@ extern void seph2pos(gtime_t time, const seph_t *seph, double *rs, double *dts,
     *var=var_uraeph(SYS_SBS,seph->sva);
 }
 /* select ephememeris --------------------------------------------------------*/
+/**
+ * @brief 从nav中选择星历
+ * 
+ * @param time 观测值的接收机采样时间
+ * @param sat  rtklib中对卫星的编号
+ * @param iode 星历数据期号，标准定义是：数据龄期参数，本组卫星星历参数的外推时间间隔。
+        用本组卫星星历参数参考时刻toe与卫星定轨计算所使用的最后一个观测数据时刻之差来表示。
+        卫星星历参数的参考时刻toe为整小时，卫星星历参数有效时间为2小时。
+ * @param nav 星历信息，含选出的星历
+ * @return eph_t* 
+ */
 static eph_t *seleph(gtime_t time, int sat, int iode, const nav_t *nav)
 {
     double t,tmax,tmin;
@@ -442,12 +484,15 @@ static eph_t *seleph(gtime_t time, int sat, int iode, const nav_t *nav)
         if (iode>=0&&nav->eph[i].iode!=iode) continue;
         if (sys==SYS_GAL) {
             sel=getseleph(SYS_GAL);
+            /*GALILEO卫星的广播星历分为两种:F/NAV 和 I/NAV*/
             if (sel==0&&!(nav->eph[i].code&(1<<9))) continue; /* I/NAV */
             if (sel==1&&!(nav->eph[i].code&(1<<8))) continue; /* F/NAV */
             if (timediff(nav->eph[i].toe,time)>=0.0) continue; /* AOD<=0 */
         }
+        /*观测时刻与卫星星历参数参考时刻toe超过tmax,则不采用该组星历*/
         if ((t=fabs(timediff(nav->eph[i].toe,time)))>tmax) continue;
         if (iode>=0) return nav->eph+i;
+        /* IODE<0是指不按期号查找星历，直接查找时间最近的星历。*/
         if (t<=tmin) {j=i; tmin=t;} /* toe closest to time */
     }
     if (iode>=0||j<0) {
@@ -499,6 +544,16 @@ static seph_t *selseph(gtime_t time, int sat, const nav_t *nav)
     return nav->seph+j;
 }
 /* satellite clock with broadcast ephemeris ----------------------------------*/
+/**
+ * @brief 通过找到的广播星历计算卫星钟差，并通过dts返回
+ * 
+ * @param time 卫星信号发射时间
+ * @param teph 观测值的接收机采样时间
+ * @param sat  rtklib中的卫星编号
+ * @param nav  该历元接收的所有星历
+ * @param dts  指针返回值
+ * @return int 
+ */
 static int ephclk(gtime_t time, gtime_t teph, int sat, const nav_t *nav,
                   double *dts)
 {
@@ -508,11 +563,15 @@ static int ephclk(gtime_t time, gtime_t teph, int sat, const nav_t *nav,
     int sys;
     
     trace(4,"ephclk  : time=%s sat=%2d\n",time_str(time,3),sat);
-    
+
+    /* 求取当前卫星所在的系统*/
     sys=satsys(sat,NULL);
     
+    /* 因为GPS、GALILEO、北斗、QZSS、IRN的星历格式一样，所以归为一类*/
     if (sys==SYS_GPS||sys==SYS_GAL||sys==SYS_QZS||sys==SYS_CMP||sys==SYS_IRN) {
+        /*找到nav中最邻近的星历，并返回，如果没有找到，则退出函数*/
         if (!(eph=seleph(teph,sat,-1,nav))) return 0;
+        /* 通过找到的广播星历计算卫星钟差，并通过dts返回*/
         *dts=eph2clk(time,eph);
     }
     else if (sys==SYS_GLO) {
@@ -528,6 +587,20 @@ static int ephclk(gtime_t time, gtime_t teph, int sat, const nav_t *nav,
     return 1;
 }
 /* satellite position and clock by broadcast ephemeris -----------------------*/
+/**
+ * @brief 
+ * 
+ * @param time     经过钟差改正的卫星信号发射时间
+ * @param teph     观测值的接收机采样时间,也是选择星历的参考时间
+ * @param sat      rtklib中卫星编号
+ * @param nav      输入的该历元所有星历
+ * @param iode     卫星星历参数的外推时间间隔。
+ * @param rs       卫星的位置和速度
+ * @param dts      卫星钟差
+ * @param var      卫星位置和钟差的方差
+ * @param svh      卫星健康状态标识
+ * @return int 
+ */
 static int ephpos(gtime_t time, gtime_t teph, int sat, const nav_t *nav,
                   int iode, double *rs, double *dts, double *var, int *svh)
 {
@@ -546,6 +619,7 @@ static int ephpos(gtime_t time, gtime_t teph, int sat, const nav_t *nav,
     if (sys==SYS_GPS||sys==SYS_GAL||sys==SYS_QZS||sys==SYS_CMP||sys==SYS_IRN) {
         if (!(eph=seleph(teph,sat,iode,nav))) return 0;
         eph2pos(time,eph,rs,dts,var);
+        //增加1ms(推测为经验值)到time上，再次进行卫星位置和钟差的计算
         time=timeadd(time,tt);
         eph2pos(time,eph,rst,dtst,var);
         *svh=eph->svh;
@@ -567,6 +641,7 @@ static int ephpos(gtime_t time, gtime_t teph, int sat, const nav_t *nav,
     else return 0;
     
     /* satellite velocity and clock drift by differential approx */
+    /* 通过差分计算卫星速度以及钟漂 */
     for (i=0;i<3;i++) rs[i+3]=(rst[i]-rs[i])/tt;
     dts[1]=(dtst[0]-dts[0])/tt;
     
@@ -714,6 +789,23 @@ static int satpos_ssr(gtime_t time, gtime_t teph, int sat, const nav_t *nav,
 * notes  : satellite position is referenced to antenna phase center
 *          satellite clock does not include code bias correction (tgd or bgd)
 *-----------------------------------------------------------------------------*/
+/**
+ * @brief 
+ * 
+ * @param time     经过钟差改正的卫星信号发射时间
+ * @param teph     观测值的接收机采样时间,也是选择星历的参考时间
+ * @param sat      rtklib中卫星编号
+ * @param ephopt   星历选项（根据不同类型的星历进行相应处理）
+ * @param nav      输入的该历元所有星历
+ * @param rs       卫星的位置和速度
+ * @param dts      卫星钟差
+ * @param var      卫星位置和钟差的方差
+ * @param svh      卫星健康状态标识
+ * @return int 
+ * 
+ * @note 卫星位置是指卫星天线相位参考中心的位置；
+ *       此处卫星钟差不包含时延差改正，即不包括从信号产生到天线发出所经过的时延
+ */
 extern int satpos(gtime_t time, gtime_t teph, int sat, int ephopt,
                   const nav_t *nav, double *rs, double *dts, double *var,
                   int *svh)
@@ -757,6 +849,23 @@ extern int satpos(gtime_t time, gtime_t teph, int sat, int ephopt,
 *          any pseudorange and broadcast ephemeris are always needed to get
 *          signal transmission time
 *-----------------------------------------------------------------------------*/
+/**
+ * @brief 计算卫星的位置，速度以及钟差
+ * 
+ * @param teph    观测值的接收机采样时间
+ * @param obs     单个历元的观测值数组，obs[i].rcv = 1 代表该组值为移动站值，2代表基站值
+ * @param n       观测值个数
+ * @param nav     星历数据
+ * @param ephopt  星历类型，包括广播星历、精密星历以及SBAS等，详见rtklib.h EPHOPT_???
+ * @param rs      ECEF坐标系下，卫星的位置和速度
+ * @param dts     卫星钟差，为待输出的值
+ * @param var     卫星位置和钟差的方差
+ * @param svh     卫星健康状态标识，
+ * 
+ * @note 如果没有星历数据，则设置rs[]，dts[]，var[]和svh[]为0，卫星位置和时钟信息是信号
+ *       发射时的值。卫星位置参考天线相位中心，卫星钟差不包括时延差改正(tgd 或 bgd)
+ *       任何伪距和广播星历都需要信号发射时间
+ */
 extern void satposs(gtime_t teph, const obsd_t *obs, int n, const nav_t *nav,
                     int ephopt, double *rs, double *dts, double *var, int *svh)
 {
@@ -766,12 +875,14 @@ extern void satposs(gtime_t teph, const obsd_t *obs, int n, const nav_t *nav,
     
     trace(3,"satposs : teph=%s n=%d ephopt=%d\n",time_str(teph,3),n,ephopt);
     
-    for (i=0;i<n&&i<2*MAXOBS;i++) {
+    for (i=0;i<n&&i<2*MAXOBS;i++) { // i < 2*MAXOBS 小于基站和移动站的观测值个数
+        /*rs dts var svh 数组的初始化*/
         for (j=0;j<6;j++) rs [j+i*6]=0.0;
         for (j=0;j<2;j++) dts[j+i*2]=0.0;
         var[i]=0.0; svh[i]=0;
         
         /* search any pseudorange */
+        /*如果第i个观测值的某个伪距不为0，则将该值赋给pr，同时跳出循环*/
         for (j=0,pr=0.0;j<NFREQ;j++) if ((pr=obs[i].P[j])!=0.0) break;
         
         if (j>=NFREQ) {
@@ -779,13 +890,16 @@ extern void satposs(gtime_t teph, const obsd_t *obs, int n, const nav_t *nav,
             continue;
         }
         /* transmission time by satellite clock */
+        /* 卫星发射信号的时间赋给time[i]*/
         time[i]=timeadd(obs[i].time,-pr/CLIGHT);
         
         /* satellite clock bias by broadcast ephemeris */
+        /* 通过广播星历求卫星的钟差 */
         if (!ephclk(time[i],teph,obs[i].sat,nav,&dt)) {
             trace(3,"no broadcast clock %s sat=%2d\n",time_str(time[i],3),obs[i].sat);
             continue;
         }
+        /* 通过上一步求出的卫星钟差改正卫星发射信号的时间*/
         time[i]=timeadd(time[i],-dt);
         
         /* satellite position and clock at transmission time */
@@ -795,6 +909,8 @@ extern void satposs(gtime_t teph, const obsd_t *obs, int n, const nav_t *nav,
             continue;
         }
         /* if no precise clock available, use broadcast clock instead */
+        /* 由于使用精密星历可能没有计算出卫星钟差，所以就用广播星历进行计算。正常使用广播星历
+           计算卫星位置，卫星钟差应该是不会为0的。*/
         if (dts[i*2]==0.0) {
             if (!ephclk(time[i],teph,obs[i].sat,nav,dts+i*2)) continue;
             dts[1+i*2]=0.0;
