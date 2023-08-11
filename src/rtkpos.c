@@ -874,7 +874,23 @@ static void zdres_sat(int base, double r, const obsd_t *obs, const nav_t *nav,
         }
     }
 }
-/* UD (undifferenced) phase/code residuals -----------------------------------*/
+/**
+description: undifferenced phase/code residuals
+args:   I   base : 1 = base, 0 = rover
+		I   obs : sat observations
+		I   n : # of sats
+		I   rs[(0:2) + i * 6]: sat position{ x,y,z } (m)
+		I   dts[(0:1) + i * 2] : sat clock{ bias,drift } (s | s / s)
+		I   svh : sat health flags
+		I   nav : sat nav data
+		I   rr : receiver pos(x, y, z) 
+		I   opt : options
+		I   index : 1 = base, 0 = rover
+		O   y[(0:1) + i * 2] : zero diff residuals{ phase,code } (m)
+		O   e : line of sight unit vectors to sats(卫星观测方向单位矢量)
+		O   azel : [az, el] to sats （方位角、仰角）
+return :
+int                  O(1:ok, 0 : error)  */    
 static int zdres(int base, const obsd_t *obs, int n, const double *rs,
                  const double *dts, const double *var, const int *svh,
                  const nav_t *nav, const double *rr, const prcopt_t *opt,
