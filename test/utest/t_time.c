@@ -9,6 +9,7 @@
 #define TIME_64BIT 1
 
 /* str2num() */
+/*  test  */
 void utest1(void)
 {
     double a;
