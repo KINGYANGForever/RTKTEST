@@ -624,6 +624,13 @@ extern int pntpos(const obsd_t *obs, int n, const nav_t *nav,
     sol->time=obs[0].time;
     msg[0]='\0';
     
+    /**
+     * rs     位置速度
+     * dts    钟差(卫星+接收机)
+     * var    协方差
+     * azel_  方位角+仰角
+     * resp   残差
+    */
     rs=mat(6,n); dts=mat(2,n); var=mat(1,n); azel_=zeros(2,n); resp=mat(1,n);
     
     if (opt_.mode!=PMODE_SINGLE) { /* for precise positioning */
@@ -631,9 +638,11 @@ extern int pntpos(const obsd_t *obs, int n, const nav_t *nav,
         opt_.tropopt=TROPOPT_SAAS;
     }
     /* satellite positons, velocities and clocks */
+    /* 计算卫星位置、速度和钟差 */
     satposs(sol->time,obs,n,nav,opt_.sateph,rs,dts,var,svh);
     
     /* estimate receiver position with pseudorange */
+    /* 利用伪距观测值估计接收机的位置 */
     stat=estpos(obs,n,rs,dts,var,svh,nav,&opt_,sol,azel_,vsat,resp,msg);
     
     /* RAIM FDE */
@@ -642,6 +651,7 @@ extern int pntpos(const obsd_t *obs, int n, const nav_t *nav,
     }
     /* estimate receiver velocity with Doppler */
     if (stat) {
+        /* 利用多普勒观测值进行速度的估计 */
         estvel(obs,n,rs,dts,nav,&opt_,sol,azel_,vsat);
     }
     if (azel) {
