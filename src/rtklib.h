@@ -549,6 +549,23 @@ typedef struct {        /* observation data */
     obsd_t *data;       /* observation data records */
 } obs_t;
 
+// typedef struct {                  /* 观测值结构体 */
+//     gtime_t time;                 /* 接收机的采样时间 (GPST) */
+//     uint8_t sat,rcv;              /* 卫星/接收机的个数 */
+//     uint16_t SNR[NFREQ+NEXOBS];   /* 信号的强度(信噪比) (0.001 dBHz) */
+//     uint8_t  LLI[NFREQ+NEXOBS];   /* LLI标志(用于周跳检测) */
+//     uint8_t code[NFREQ+NEXOBS];   /* code indicator (CODE_???)  码的标志 */
+//     double L[NFREQ+NEXOBS];       /* 载波观测值 (cycle) */
+//     double P[NFREQ+NEXOBS];       /* 伪距观测值 (m) */
+//     float  D[NFREQ+NEXOBS];       /* 多普勒观测值 (Hz) */
+    
+//     int timevalid;                /* time is valid (Valid GNSS fix) for time mark */
+//     gtime_t eventime;             /* time of event (GPST) */
+//     uint8_t qualL[NFREQ+NEXOBS];  /* quality of carrier phase measurement */
+//     uint8_t qualP[NFREQ+NEXOBS];  /* quality of pseudorange measurement */
+//     uint8_t freq;                 /* GLONASS frequency channel (0-13) */
+// } obsd_t;
+
 typedef struct {        /* earth rotation parameter data type */
     double mjd;         /* mjd (days) */
     double xp,yp;       /* pole offset (rad) */

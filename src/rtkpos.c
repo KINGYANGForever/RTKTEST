@@ -423,8 +423,13 @@ static int selsat(const obsd_t *obs, double *azel, int nu, int nr,
     trace(3,"selsat  : nu=%d nr=%d\n",nu,nr);
     
     for (i=0,j=nu;i<nu&&j<nu+nr;i++,j++) {
+        /* 这里，obs[i]中：流动站为obs[0~nu-1] ，基准站为obs[nu~nu+nr-1] */
+        /* obs里是按照卫星编号的大小排列的，所以这里才会这么写 */
+        /* 在下边i--和j--后，在循环结束时又会++回来，相当于在下一次循环有一个是不变的 */
+        /* 这样就实现了只有找到一个共视卫星的时候，才会一起++去找下一个卫星 */
         if      (obs[i].sat<obs[j].sat) j--;
         else if (obs[i].sat>obs[j].sat) i--;
+        /* 乘2是因为这里还有方位角 */
         else if (azel[1+j*2]>=opt->elmin) { /* elevation at base station */
             sat[k]=obs[i].sat; iu[k]=i; ir[k++]=j;
             trace(4,"(%2d) sat=%3d iu=%2d ir=%2d\n",k-1,obs[i].sat,i,j);
@@ -1784,16 +1789,22 @@ extern int rtkpos(rtk_t *rtk, const obsd_t *obs, int n, const nav_t *nav)
     /* set base staion position */
     if (opt->refpos<=POSOPT_RINEX&&opt->mode!=PMODE_SINGLE&&
         opt->mode!=PMODE_MOVEB) {
+        /* 基准站坐标在execses()函数中计算 */
+        /* 速度都先设为0 */
         for (i=0;i<6;i++) rtk->rb[i]=i<3?opt->rb[i]:0.0;
     }
     /* count rover/base station observations */
+    /* 分别统计基准站观测值的个数nu和流动站观测值的个数nr */
     for (nu=0;nu   <n&&obs[nu   ].rcv==1;nu++) ;
     for (nr=0;nu+nr<n&&obs[nu+nr].rcv==2;nr++) ;
     
+    /* 这里还未更新rtk->sol.time，所以是上一历元的时间 */
     time=rtk->sol.time; /* previous epoch */
     
     /* rover position by single point positioning */
+    /* 这里会先计算SPP结果，作为kalman滤波的近似坐标 */
     if (!pntpos(obs,nu,nav,&rtk->opt,&rtk->sol,NULL,rtk->ssat,msg)) {
+        /* SPP解算失败，这个时候会进到这里 */
         errmsg(rtk,"point pos error (%s)\n",msg);
         
         if (!rtk->opt.dynamics) {
@@ -1809,10 +1820,12 @@ extern int rtkpos(rtk_t *rtk, const obsd_t *obs, int n, const nav_t *nav)
         return 1;
     }
     /* suppress output of single solution */
+    /* 非单点定位模式，就不输出单点定位的解 */
     if (!opt->outsingle) {
         rtk->sol.stat=SOLQ_NONE;
     }
     /* precise point positioning */
+    /* PPP模式，调用pppos进行PPP解算 */
     if (opt->mode>=PMODE_PPP_KINEMA) {
         pppos(rtk,obs,nu,nav);
         outsolstat(rtk);
@@ -1828,9 +1841,11 @@ extern int rtkpos(rtk_t *rtk, const obsd_t *obs, int n, const nav_t *nav)
         
         /* estimate position/velocity of base station */
         if (!pntpos(obs+nu,nr,nav,&rtk->opt,&solb,NULL,NULL,msg)) {
+            /* 计算得到基站的坐标 */
             errmsg(rtk,"base station position error (%s)\n",msg);
             return 0;
         }
+        
         rtk->sol.age=(float)timediff(rtk->sol.time,solb.time);
         
         if (fabs(rtk->sol.age)>TTOL_MOVEB) {
@@ -1843,8 +1858,10 @@ extern int rtkpos(rtk_t *rtk, const obsd_t *obs, int n, const nav_t *nav)
         for (i=0;i<3;i++) rtk->rb[i]+=rtk->rb[i+3]*rtk->sol.age;
     }
     else {
+        /* 移动站相对基准站的时间差 */
         rtk->sol.age=(float)timediff(obs[0].time,obs[nu].time);
         
+        /* 时间差过大的情况下直接返回 */
         if (fabs(rtk->sol.age)>opt->maxtdiff) {
             errmsg(rtk,"age of differential error (age=%.1f)\n",rtk->sol.age);
             outsolstat(rtk);
@@ -1852,6 +1869,7 @@ extern int rtkpos(rtk_t *rtk, const obsd_t *obs, int n, const nav_t *nav)
         }
     }
     /* relative potitioning */
+    /* 核心函数 */
     relpos(rtk,obs,nu,nr,nav);
     outsolstat(rtk);
     
