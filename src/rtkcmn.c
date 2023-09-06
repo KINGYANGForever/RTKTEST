@@ -1142,20 +1142,36 @@ extern int solve(const char *tr, const double *A, const double *Y, int n,
 #else /* without LAPACK/BLAS or MKL */
 
 /* multiply matrix -----------------------------------------------------------*/
+/**
+ * @brief 计算两个矩阵的乘积
+ * 
+ * @param[in] tr 字符串指针，表示矩阵乘法的转置方式。可选的取值是 "NN"、"NT"、"TN" 和 "TT"，分别表示两个矩阵都不需要转置、只需转置右侧矩阵、只需转置左侧矩阵和两个矩阵都需要转置
+ * @param[in] n 表示左侧矩阵的行数和结果矩阵的行数
+ * @param[in] k 表示左侧矩阵的列数和右侧矩阵的行数
+ * @param[in] m 表示右侧矩阵的列数和结果矩阵的列数
+ * @param[in] alpha 表示乘法的比例因子
+ * @param[in] A 左侧矩阵
+ * @param[in] B 右侧矩阵
+ * @param[in] beta 结果矩阵的比例因子
+ * @param[in] C 结果矩阵
+ */
 extern void matmul(const char *tr, int n, int k, int m, double alpha,
                    const double *A, const double *B, double beta, double *C)
 {
     double d;
+    // Step 1.根据 tr 的取值，选择不同的转置方式，并将结果存储在变量 f 中
     int i,j,x,f=tr[0]=='N'?(tr[1]=='N'?1:2):(tr[1]=='N'?3:4);
-    
+    // Step 2.使用两层嵌套的循环遍历结果矩阵的每个元素
     for (i=0;i<n;i++) for (j=0;j<k;j++) {
         d=0.0;
+        // Step 3.根据 f 的取值选择不同的乘法方式，使用三层嵌套的循环计算矩阵乘积的每个元素
         switch (f) {
             case 1: for (x=0;x<m;x++) d+=A[i+x*n]*B[x+j*m]; break;
             case 2: for (x=0;x<m;x++) d+=A[i+x*n]*B[j+x*k]; break;
             case 3: for (x=0;x<m;x++) d+=A[x+i*m]*B[x+j*m]; break;
             case 4: for (x=0;x<m;x++) d+=A[x+i*m]*B[j+x*k]; break;
         }
+        // Step 4.根据 beta 的取值，将计算得到的乘积结果加权并加到结果矩阵的对应位置上
         if (beta==0.0) C[i+j*n]=alpha*d; else C[i+j*n]=alpha*d+beta*C[i+j*n];
     }
 }
@@ -1282,26 +1298,59 @@ extern int lsq(const double *A, const double *y, int n, int m, double *x,
 * notes  : matirix stored by column-major order (fortran convention)
 *          if state x[i]==0.0, not updates state x[i]/P[i+i*n]
 *-----------------------------------------------------------------------------*/
+
+/**
+ * @brief 卡尔曼滤波运算
+ * 
+ * @param[in] x 状态变量(n×1)
+ * @param[in] P 状态变量的误差协方差矩阵(n×n)
+ * @param[in] H 观测矩阵的转置(n×m)
+ * @param[in] v 实际观测量与预测观测量的残差(measurement - model)(m×1)
+ * @param[in] R 测量误差的协方差(m×m)
+ * @param[in] n 状态变量个数
+ * @param[in] m 观测值个数
+ * @param[in] xp 更新后的状态变量
+ * @param[in] Pp 更新后的状态变量的误差协方差矩阵
+ * @return int 0: ok; <0: error
+ */
 static int filter_(const double *x, const double *P, const double *H,
                    const double *v, const double *R, int n, int m,
                    double *xp, double *Pp)
 {
+    // Step 1.声明并分配内存给一些临时变量
     double *F=mat(n,m),*Q=mat(m,m),*K=mat(n,m),*I=eye(n);
     int info;
-    
+    // Step 2.复制输入的状态变量和误差协方差矩阵到相应的临时变量
     matcpy(Q,R,m,m);
     matcpy(xp,x,n,1);
+    // Step 3.计算 F = H' * P
     matmul("NN",n,m,n,1.0,P,H,0.0,F);       /* Q=H'*P*H+R */
+    // Step 4.计算 Q = F * H + R
     matmul("TN",m,m,n,1.0,H,F,1.0,Q);
+    // Step 5.判断Q是否可逆
     if (!(info=matinv(Q,m))) {
         matmul("NN",n,m,m,1.0,F,Q,0.0,K);   /* K=P*H*Q^-1 */
         matmul("NN",n,1,m,1.0,K,v,1.0,xp);  /* xp=x+K*v */
+        // 计算 I - K * H'
         matmul("NT",n,n,m,-1.0,K,H,1.0,I);  /* Pp=(I-K*H')*P */
+        // 计算 Pp = (I - K * H') * P
         matmul("NN",n,n,n,1.0,I,P,0.0,Pp);
     }
     free(F); free(Q); free(K); free(I);
     return info;
 }
+/**
+ * @brief  卡尔曼滤波运算
+ * 
+ * @param[in] x 状态变量(n×1)
+ * @param[in] P 状态变量的误差协方差矩阵(n×n)
+ * @param[in] H 观测矩阵的转置(n×m)
+ * @param[in] v 实际观测量与预测观测量的残差(measurement - model)(m×1)
+ * @param[in] R 测量误差的协方差(m×m)
+ * @param[in] n 状态变量个数
+ * @param[in] m 观测值个数
+ * @return int 0: ok; <0: error
+ */
 extern int filter(double *x, double *P, const double *H, const double *v,
                   const double *R, int n, int m)
 {
@@ -1310,12 +1359,15 @@ extern int filter(double *x, double *P, const double *H, const double *v,
     
     ix=imat(n,1); for (i=k=0;i<n;i++) if (x[i]!=0.0&&P[i+i*n]>0.0) ix[k++]=i;
     x_=mat(k,1); xp_=mat(k,1); P_=mat(k,k); Pp_=mat(k,k); H_=mat(k,m);
+    // Step 1. 选择需要更新的状态
     for (i=0;i<k;i++) {
         x_[i]=x[ix[i]];
         for (j=0;j<k;j++) P_[i+j*k]=P[ix[i]+ix[j]*n];
         for (j=0;j<m;j++) H_[i+j*k]=H[ix[i]+j*n];
     }
+    // Step 2. 进行卡尔曼滤波更新
     info=filter_(x_,P_,H_,v,R,k,m,xp_,Pp_);
+    // Step 3. 将更新值存储到x、P中
     for (i=0;i<k;i++) {
         x[ix[i]]=xp_[i];
         for (j=0;j<k;j++) P[ix[i]+ix[j]*n]=Pp_[i+j*k];

@@ -386,8 +386,10 @@ static double gfobs(const obsd_t *obs, int i, int j, int k, const nav_t *nav)
 static double varerr(int sat, int sys, double el, double bl, double dt, int f,
                      const prcopt_t *opt)
 {
-    double a,b,c=opt->err[3]*bl/1E4,d=CLIGHT*opt->sclkstab*dt,fact=1.0;
-    double sinel=sin(el);
+    double a,b,
+                    c=opt->err[3]*bl/1E4, // 基线误差
+                    d=CLIGHT*opt->sclkstab*dt,fact=1.0;// 时钟稳定性误差
+    double sinel=sin(el);// 高度角
     int nf=NF(opt);
     
     if (f>=nf) fact=opt->eratio[f-nf];
@@ -968,6 +970,7 @@ static void ddcov(const int *nb, int n, const double *Ri, const double *Rj,
     for (b=0;b<n;k+=nb[b++]) {
         
         for (i=0;i<nb[b];i++) for (j=0;j<nb[b];j++) {
+            // 根据varerr中计算的单差量测噪声方差计算
             R[k+i+(k+j)*nv]=Ri[k+i]+(i==j?Rj[k+i]:0.0);
         }
     }
@@ -1016,16 +1019,31 @@ static int constbl(rtk_t *rtk, const double *x, const double *P, double *v,
     return 1;
 }
 /* precise tropspheric model -------------------------------------------------*/
+/**
+ * @brief 计算对流层湿分量以及东向、北向梯度因子
+ * 
+ * @param time 当前历元时间
+ * @param pos 基站/移动站位置：经纬高
+ * @param r 0表示移动站，1表示基站，用来计算对流层状态量在卡诶曼滤波状态矢量的索引
+ * @param azel 高度角
+ * @param opt 
+ * @param x 卡尔曼滤波状态矢量
+ * @param dtdx 对流层湿分量、东向和北向梯度因子
+ * @return double 
+ */
+
 static double prectrop(gtime_t time, const double *pos, int r,
                        const double *azel, const prcopt_t *opt, const double *x,
                        double *dtdx)
 {
     double m_w=0.0,cotz,grad_n,grad_e;
+    // Step 1.首先找到对流层天顶方向延迟状态量的索引
     int i=IT(r,opt);
     
     /* wet mapping function */
+    // Step 2.计算湿分量投影函数
     tropmapf(time,pos,azel,&m_w);
-    
+    // Step 3.计算湿延迟
     if (opt->tropopt>=TROPOPT_ESTG&&azel[1]>0.0) {
         
         /* m_w=m_0+m_0*cot(el)*(Gn*cos(az)+Ge*sin(az)): ref [6] */
@@ -1054,6 +1072,29 @@ static int test_sys(int sys, int m)
     }
     return 0;
 }
+/**
+ * @brief 计算双差残差和量测矩阵H
+ *
+ * @param rtk->ssat[i].resp[j] = residual pseudorange error
+    @param rtk->ssat[i].resc[j] = residual carrier phase error
+    @param rtk->rb= base location
+    @param nav  = sat nav data
+    @param dt = time diff between base and rover observations (usually 0)
+    @param x = rover pos & vel and sat phase biases (float solution)
+    @param P = error covariance matrix of float states
+    @param sat = list of common sats
+    @param y = zero diff residuals (code and phase, base and rover)
+    @param e = line of sight unit vectors to sats
+    @param azel = [az, el] to sats
+    @param iu,ir = user and ref indices to sats
+    @param ns = # of sats
+    @param v = double diff innovations (measurement-model) (phase and code)
+    @param H = linearized translation from innovations to states (az/el to sats)
+    @param R = measurement error covariances
+    @param vflg = bit encoded list of sats used for each double diff 
+
+ * 
+ */
 /* DD (double-differenced) phase/code residuals ------------------------------*/
 static int ddres(rtk_t *rtk, const nav_t *nav, double dt, const double *x,
                  const double *P, const int *sat, double *y, double *e,
@@ -1066,41 +1107,50 @@ static int ddres(rtk_t *rtk, const nav_t *nav, double dt, const double *x,
     int i,j,k,m,f,nv=0,nb[NFREQ*4*2+2]={0},b=0,sysi,sysj,nf=NF(opt);
     
     trace(3,"ddres   : dt=%.1f nx=%d ns=%d\n",dt,rtk->nx,ns);
-    
+    // Step 1.计算基站和移动站间的极线长度并将基站位置、移动站位置从ECEF坐标系转到WGS-84坐标系
+    // 计算基准站和流动站之间的距离，将基准站和移动站xyz位置各自相减后存入dr数组中
+    // x 数组前3个存储了移动站xyz位置，rtk->rb数组前3个存储基站位置
     bl=baseline(x,rtk->rb,dr);
+    // 将ecef坐标系转换为WGS-84坐标系
     ecef2pos(x,posu); ecef2pos(rtk->rb,posr);
-    
+    // Step 2.对一些变量进行初始化，并将双差伪距残差和双差载波相位残差初始化为0
     Ri=mat(ns*nf*2+2,1); Rj=mat(ns*nf*2+2,1); im=mat(ns,1);
     tropu=mat(ns,1); tropr=mat(ns,1); dtdxu=mat(ns,3); dtdxr=mat(ns,3);
-    
+    // 重载卫星伪距和载波相位  MAXSAT卫星数量   NFREQ卫星频段
     for (i=0;i<MAXSAT;i++) for (j=0;j<NFREQ;j++) {
         rtk->ssat[i].resp[j]=rtk->ssat[i].resc[j]=0.0;
     }
     /* compute factors of ionospheric and tropospheric delay */
+    // 电离层和对流层
     for (i=0;i<ns;i++) {
+    // Step 3.计算基站和流动站处的投影函数，并将其平均值作为“单垂直电离层延迟状态量”的投影系数
         if (opt->ionoopt>=IONOOPT_EST) {
+            // ? 为什么用均值
             im[i]=(ionmapf(posu,azel+iu[i]*2)+ionmapf(posr,azel+ir[i]*2))/2.0;
         }
+    // Step 4.计算基站和移动站对流层延迟湿分量，干分量已在zdres中去除
         if (opt->tropopt>=TROPOPT_EST) {
             tropu[i]=prectrop(rtk->sol.time,posu,0,azel+iu[i]*2,opt,x,dtdxu+i*3);
             tropr[i]=prectrop(rtk->sol.time,posr,1,azel+ir[i]*2,opt,x,dtdxr+i*3);
         }
     }
     for (m=0;m<6;m++) /* m=0:GPS/SBS,1:GLO,2:GAL,3:BDS,4:QZS,5:IRN */
-    
+    // 载波相位为0-nf，伪距为nf-2nf
     for (f=opt->mode>PMODE_DGPS?0:nf;f<nf*2;f++) {
         
         /* search reference satellite with highest elevation */
+        // Step 4.1.寻找仰角最大的卫星并将编号保存在i中，作为参考星
         for (i=-1,j=0;j<ns;j++) {
             sysi=rtk->ssat[sat[j]-1].sys;
-            if (!test_sys(sysi,m)) continue;
-            if (!validobs(iu[j],ir[j],f,nf,y)) continue;
+            if (!test_sys(sysi,m)) continue; // 当前卫星不属于该系统则跳过
+            if (!validobs(iu[j],ir[j],f,nf,y)) continue; // 测试观测数据是否有效
             if (i<0||azel[1+iu[j]*2]>=azel[1+iu[i]*2]) i=j;
         }
         if (i<0) continue;
-        
+        // 遍历各个卫星
         /* make DD (double difference) */
         for (j=0;j<ns;j++) {
+            // 卫星异常检查
             if (i==j) continue;
             sysi=rtk->ssat[sat[i]-1].sys;
             sysj=rtk->ssat[sat[j]-1].sys;
@@ -1108,32 +1158,40 @@ static int ddres(rtk_t *rtk, const nav_t *nav, double dt, const double *x,
             freqj=freq[f%nf+iu[j]*nf];
             if (!test_sys(sysj,m)) continue;
             if (!validobs(iu[j],ir[j],f,nf,y)) continue;
-            
+            // 重置测量方程H
             if (H) {
                 Hi=H+nv*rtk->nx;
                 for (k=0;k<rtk->nx;k++) Hi[k]=0.0;
             }
             /* DD residual */
+            // Step 4.2.利用zdres函数中计算的载波相位/伪距非差残差，计算每颗卫星的载波相位/伪距双差残差，并对量测矩阵H中和位置状态量相关的部分进行赋值
+            // 参考星（移动站非差残差 - 基准站非差残差） - 非参考星（移动站非差残差 - 基准站非差残差）
             v[nv]=(y[f+iu[i]*nf*2]-y[f+ir[i]*nf*2])-
                   (y[f+iu[j]*nf*2]-y[f+ir[j]*nf*2]);
             
             /* partial derivatives by rover position */
+            // 根据参考星和当前星的单位矢量，在Hi中记录参考星指向当前星的矢量
             if (H) {
                 for (k=0;k<3;k++) {
                     Hi[k]=-e[k+iu[i]*3]+e[k+iu[j]*3];
                 }
             }
             /* DD ionospheric delay term */
+            // Step 4.3.计算电离层单差延迟量，伪距和载波相位的电离层延迟大小相同，符号相反
+            // f<nf时为载波相位，nf<f<2nf时为伪距
             if (opt->ionoopt==IONOOPT_EST) {
                 didxi=(f<nf?-1.0:1.0)*im[i]*SQR(FREQ1/freqi);
                 didxj=(f<nf?-1.0:1.0)*im[j]*SQR(FREQ1/freqj);
+                // 从载波相位/伪距双差残差值中扣除该卫星的双差电离层延迟量
                 v[nv]-=didxi*x[II(sat[i],opt)]-didxj*x[II(sat[j],opt)];
+                // 对观测方程H中和电离层状态量相关的部分进行赋值
                 if (H) {
                     Hi[II(sat[i],opt)]= didxi;
                     Hi[II(sat[j],opt)]=-didxj;
                 }
             }
             /* DD tropospheric delay term */
+            // Step 4.4.同上
             if (opt->tropopt==TROPOPT_EST||opt->tropopt==TROPOPT_ESTG) {
                 v[nv]-=(tropu[i]-tropu[j])-(tropr[i]-tropr[j]);
                 for (k=0;k<(opt->tropopt<TROPOPT_ESTG?1:3);k++) {
@@ -1145,6 +1203,7 @@ static int ddres(rtk_t *rtk, const nav_t *nav, double dt, const double *x,
             /* DD phase-bias term */
             if (f<nf) {
                 if (opt->ionoopt!=IONOOPT_IFLC) {
+                    // 无电离层组合，从载波相位双差残差中扣除双差模糊度
                     v[nv]-=CLIGHT/freqi*x[IB(sat[i],f,opt)]-
                            CLIGHT/freqj*x[IB(sat[j],f,opt)];
                     if (H) {
@@ -1160,10 +1219,12 @@ static int ddres(rtk_t *rtk, const nav_t *nav, double dt, const double *x,
                     }
                 }
             }
+            // 保存双差残差
             if (f<nf) rtk->ssat[sat[j]-1].resc[f   ]=v[nv];
             else      rtk->ssat[sat[j]-1].resp[f-nf]=v[nv];
             
             /* test innovation */
+            // 阈值检测
             if (opt->maxinno>0.0&&fabs(v[nv])>opt->maxinno) {
                 if (f<nf) {
                     rtk->ssat[sat[i]-1].rejc[f]++;
@@ -1174,10 +1235,12 @@ static int ddres(rtk_t *rtk, const nav_t *nav, double dt, const double *x,
                 continue;
             }
             /* SD (single-differenced) measurement error variances */
+            // Step 6.计算载波相位/伪距单差的量测噪声方差
             Ri[nv]=varerr(sat[i],sysi,azel[1+iu[i]*2],bl,dt,f,opt);
             Rj[nv]=varerr(sat[j],sysj,azel[1+iu[j]*2],bl,dt,f,opt);
             
             /* set valid data flags */
+            // Step 7.设置卫星有效标志，每个频点下双差有效的卫星观测数量
             if (opt->mode>PMODE_DGPS) {
                 if (f<nf) rtk->ssat[sat[i]-1].vsat[f]=rtk->ssat[sat[j]-1].vsat[f]=1;
             }
@@ -1195,6 +1258,7 @@ static int ddres(rtk_t *rtk, const nav_t *nav, double dt, const double *x,
     /* end of system loop */
     
     /* baseline length constraint for moving baseline */
+    // Step 8.PMODE_MOVEB模式下增加基线长度约束
     if (opt->mode==PMODE_MOVEB&&constbl(rtk,x,P,v,H,Ri,Rj,nv)) {
         vflg[nv++]=3<<4;
         nb[b++]++;
@@ -1202,6 +1266,7 @@ static int ddres(rtk_t *rtk, const nav_t *nav, double dt, const double *x,
     if (H) {trace(5,"H=\n"); tracemat(5,H,rtk->nx,nv,7,4);}
     
     /* DD measurement error covariance */
+    // Step 9.计算载波相位/伪距双差量测噪声方差
     ddcov(nb,b,Ri,Rj,nv,R);
     
     free(Ri); free(Rj); free(im);
