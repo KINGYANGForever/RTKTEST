@@ -834,14 +834,26 @@ static void udstate(rtk_t *rtk, const obsd_t *obs, const int *sat,
         udbias(rtk,tt,obs,sat,iu,ir,ns,nav);
     }
 }
-/* UD (undifferenced) phase/code residual for satellite ----------------------*/
+
+/**
+ * @brief UD (undifferenced) phase/code residual for satellite
+ * @param[in] base : 1 = base, 0 = rover
+ * @param[in] r : 已修正地球自转、卫星钟差、对流层干延迟的卫地距
+ * @param[in] obs : sat observations 
+ * @param[in] nav : sat nav data, 主要用于得到各个观测值的频率
+ * @param[in] azel : [az, el] to sats （方位角、仰角）
+ * @param[in] dant : antenna offsets for each frequency (m)
+ * @param[in] opt : options 
+ * @param[out] y[(0:1)+i*2]:   zero diff residuals {phase,code} (m)
+ * @param[out] freq : 各个观测值的频率；如果是IF组合则为1
+ */
 static void zdres_sat(int base, double r, const obsd_t *obs, const nav_t *nav,
                       const double *azel, const double *dant,
                       const prcopt_t *opt, double *y, double *freq)
 {
     double freq1,freq2,C1,C2,dant_if;
     int i,nf=NF(opt);
-    
+    // Step 1.判断是否组成IF观测值
     if (opt->ionoopt==IONOOPT_IFLC) { /* iono-free linear combination */
         freq1=sat2freq(obs->sat,obs->code[0],nav);
         freq2=sat2freq(obs->sat,obs->code[1],nav);
@@ -852,8 +864,9 @@ static void zdres_sat(int base, double r, const obsd_t *obs, const nav_t *nav,
         
         C1= SQR(freq1)/(SQR(freq1)-SQR(freq2));
         C2=-SQR(freq2)/(SQR(freq1)-SQR(freq2));
+        // Step 1.1计算IF组合天线偏移
         dant_if=C1*dant[0]+C2*dant[1];
-        
+        // Step 1.2计算IF组合载波相位/伪距观测值残差
         if (obs->L[0]!=0.0&&obs->L[1]!=0.0) {
             y[0]=C1*obs->L[0]*CLIGHT/freq1+C2*obs->L[1]*CLIGHT/freq2-r-dant_if;
         }
@@ -863,7 +876,9 @@ static void zdres_sat(int base, double r, const obsd_t *obs, const nav_t *nav,
         freq[0]=1.0;
     }
     else {
+        // Step 2.在非组合情况下逐频率计算观测值残差
         for (i=0;i<nf;i++) {
+            // Step 2.1初始化各个观测值频率
             if ((freq[i]=sat2freq(obs->sat,obs->code[i],nav))==0.0) continue;
             
             /* check SNR mask */
@@ -871,44 +886,49 @@ static void zdres_sat(int base, double r, const obsd_t *obs, const nav_t *nav,
                 continue;
             }
             /* residuals = observable - pseudorange */
+            // ! y中元素的排布是所有频率的载波残差|所有频率的伪距残差
             if (obs->L[i]!=0.0) y[i   ]=obs->L[i]*CLIGHT/freq[i]-r-dant[i];
             if (obs->P[i]!=0.0) y[i+nf]=obs->P[i]               -r-dant[i];
         }
     }
 }
+
 /**
-description: undifferenced phase/code residuals
-args:   I   base : 1 = base, 0 = rover
-		I   obs : sat observations
-		I   n : # of sats
-		I   rs[(0:2) + i * 6]: sat position{ x,y,z } (m)
-		I   dts[(0:1) + i * 2] : sat clock{ bias,drift } (s | s / s)
-		I   svh : sat health flags
-		I   nav : sat nav data
-		I   rr : receiver pos(x, y, z) 
-		I   opt : options
-		I   index : 1 = base, 0 = rover
-		O   y[(0:1) + i * 2] : zero diff residuals{ phase,code } (m)
-		O   e : line of sight unit vectors to sats(卫星观测方向单位矢量)
-		O   azel : [az, el] to sats （方位角、仰角）
-        difference
-return :
-int                  O(1:ok, 0 : error)  */    
+ * @brief : undifferenced phase/code residuals
+ * @param[in] base : 1 = base, 0 = rover
+ * @param[in] obs : sat observations
+ * @param[in] n : # of sats
+ * @param[in] rs[(0:2) + i * 6]: sat position{ x,y,z } (m)
+ * @param[in] dts[(0:1) + i * 2] : sat clock{ bias,drift } (s | s / s)
+ * @param[in] var : 用户距离精度URA
+ * @param[in] svh : sat health flags
+ * @param[in] nav : sat nav data
+ * @param[in] rr : receiver pos(x, y, z) 
+ * @param[in] opt : options
+ * @param[in] index : 1 = base, 0 = rover
+ * @param[out] y[(0:1) + i * 2] : zero diff residuals{ phase,code } (m)
+ * @param[out] e : line of sight unit vectors to sats(卫星观测方向单位矢量)
+ * @param[out] azel : [az, el] to sats （方位角、仰角）
+ * @param[out] freq : 各个观测值的频率；如果是IF组合则为1数组
+ * @return int : O(1:ok, 0 : error)
+ */
 static int zdres(int base, const obsd_t *obs, int n, const double *rs,
                  const double *dts, const double *var, const int *svh,
                  const nav_t *nav, const double *rr, const prcopt_t *opt,
                  int index, double *y, double *e, double *azel, double *freq)
 {
+    // Step 1.初始化以及拷贝一些变量
+    /* 将各个频率的天线偏移(dant)初始化为0，方位角/高度角(zazel)初始化为0/90 */
     double r,rr_[3],pos[3],dant[NFREQ]={0},disp[3];
     double zhd,zazel[]={0.0,90.0*D2R};
     int i,nf=NF(opt);
     
     trace(3,"zdres   : n=%d\n",n);
-    
+    /* 将各个频率的伪距/载波相位观测值残差初始化为0.0 */
     for (i=0;i<n*nf*2;i++) y[i]=0.0;
     
     if (norm(rr,3)<=0.0) return 0; /* no receiver position */
-    
+    /* 将接收机的坐标拷贝到rr_，以便后续对其进行潮汐改正 */
     for (i=0;i<3;i++) rr_[i]=rr[i];
     
     /* earth tide correction */
@@ -917,28 +937,36 @@ static int zdres(int base, const obsd_t *obs, int n, const double *rs,
                  opt->odisp[base],disp);
         for (i=0;i<3;i++) rr_[i]+=disp[i];
     }
+    /* 将接收机的笛卡尔坐标转换为WGS84椭球的大地坐标，为后续转换到站心坐标系做准备 */
     ecef2pos(rr_,pos);
     
+    // Step 2.遍历所有卫星计算伪距/载波观测值残差
     for (i=0;i<n;i++) {
         /* compute geometric-range and azimuth/elevation angle */
+        // ! 其中返回的几何距离已改正地球自转改正项
         if ((r=geodist(rs+i*6,rr_,e+i*3))<=0.0) continue;
+        /* 计算卫星视线方向的方位角/高度角，并作一个高度角的筛选，被筛的观测值残差依然是0.0 */
         if (satazel(pos,e+i*3,azel+i*2)<opt->elmin) continue;
         
-        /* excluded satellite? */
+        /* 将星历缺失、勾选卫星系统之外、用户距离精度URA超过阈值、卫星健康状况svh不良以及人为排除的卫星排除 */
         if (satexclude(obs[i].sat,var[i],svh[i],opt)) continue;
         
         /* satellite clock-bias */
         r+=-CLIGHT*dts[i*2];
         
         /* troposphere delay model (hydrostatic) */
+        // ! 最后一个参数表示相对湿度，0.0表示返回的zhd只是对流层天顶干延迟
         zhd=tropmodel(obs[0].time,pos,zazel,0.0);
+        // ! tropmapf默认使用NMF投影函数，返回的是干延迟的投影系数项，最后一个参数含义是不算湿延迟的投影系数
         r+=tropmapf(obs[i].time,pos,azel+i*2,NULL)*zhd;
         
         /* receiver antenna phase center correction */
+        // ! 返回的dant是天线偏移在视线方向的投影，直接加在r上即可
         antmodel(opt->pcvr+index,opt->antdel[index],azel+i*2,opt->posopt[1],
                  dant);
         
         /* UD phase/code residual for satellite */
+        // ! 返回的y先是相位残差再是伪距残差
         zdres_sat(base,r,obs+i,nav,azel+i*2,dant,opt,y+i*nf*2,freq+i*nf);
     }
     trace(4,"rr_=%.3f %.3f %.3f\n",rr_[0],rr_[1],rr_[2]);

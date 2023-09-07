@@ -3586,6 +3586,7 @@ extern double geodist(const double *rs, const double *rr, double *e)
     for (i=0;i<3;i++) e[i]=rs[i]-rr[i];
     r=norm(e,3);
     for (i=0;i<3;i++) e[i]/=r;
+    /* OMGE*(rs[0]*rr[1]-rs[1]*rr[0])/CLIGHT 就是地球自转改正项在视线方向上的投影 */
     return r+OMGE*(rs[0]*rr[1]-rs[1]*rr[0])/CLIGHT;
 }
 /* satellite azimuth/elevation angle -------------------------------------------
@@ -3893,13 +3894,16 @@ extern void antmodel(const pcv_t *pcv, const double *del, const double *azel,
     
     trace(4,"antmodel: azel=%6.1f %4.1f opt=%d\n",azel[0]*R2D,azel[1]*R2D,opt);
     
+    // Step 1.计算站心坐标系enu下卫星视线单位矢量
     e[0]=sin(azel[0])*cosel;
     e[1]=cos(azel[0])*cosel;
     e[2]=sin(azel[1]);
     
+    // Step 2.逐频率计算天线相位中心相对于地面标识的偏移dant
     for (i=0;i<NFREQ;i++) {
+        // Step 2.1先将天线平均相位中心相对于天线参考点SRP的偏移(off)与天线参考点相对于地面标识(del)相加
         for (j=0;j<3;j++) off[j]=pcv->off[i][j]+del[j];
-        
+        // Step 2.2将上述得到的天线平均相位中心相对于SRP的偏移投影到视线方向，如果考虑pcv，它是直接改正在pco几何距离上的
         dant[i]=-dot(off,e,3)+(opt?interpvar(90.0-azel[1]*R2D,pcv->var[i]):0.0);
     }
     trace(5,"antmodel: dant=%6.3f %6.3f\n",dant[0],dant[1]);
