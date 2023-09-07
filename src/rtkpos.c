@@ -891,6 +891,7 @@ args:   I   base : 1 = base, 0 = rover
 		O   y[(0:1) + i * 2] : zero diff residuals{ phase,code } (m)
 		O   e : line of sight unit vectors to sats(卫星观测方向单位矢量)
 		O   azel : [az, el] to sats （方位角、仰角）
+        difference
 return :
 int                  O(1:ok, 0 : error)  */    
 static int zdres(int base, const obsd_t *obs, int n, const double *rs,
