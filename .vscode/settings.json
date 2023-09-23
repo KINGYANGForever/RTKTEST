@@ -144,5 +144,6 @@
 		"__tuple": "cpp",
 		"locale": "cpp"
 	},
-	"ros.distro": "melodic"
+	"ros.distro": "melodic",
+	"editor.fontSize": 17
 }
